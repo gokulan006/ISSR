@@ -3,6 +3,7 @@ import numpy as np
 import requests
 import json
 import re
+import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier
@@ -18,13 +19,17 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class EnhancedMIEClassifier:
-    def __init__(self, ollama_url="http://localhost:11434", model_name="MICclass"):
+    def __init__(self, ollama_url="http://localhost:11434", model_name="MICclass", verbose: bool = False):
         self.ollama_url = ollama_url
         self.model_name = model_name
+        self.verbose = verbose
         self.ml_pipeline = None
         self.rag_embeddings = None
         self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.sentiment_analyzer = SentimentIntensityAnalyzer()
+    def _log(self, msg: str):
+        if self.verbose:
+            print(msg)
         
         # Enhanced MIE keywords based on your coding instructions
         self.mie_keywords = {
@@ -73,7 +78,8 @@ class EnhancedMIEClassifier:
                 return None
                 
         except Exception as e:
-            print(f"Error: {e}")
+            if self.verbose:
+                print(f"Error: {e}")
             return None
     
     def extract_entities(self, text):
@@ -114,7 +120,8 @@ class EnhancedMIEClassifier:
                 'total_fatalities': sum(fatalities) if fatalities else 0
             }
         except Exception as e:
-            print(f"Entity extraction error: {e}")
+            if self.verbose:
+                print(f"Entity extraction error: {e}")
             return {'countries': [], 'fatalities': [], 'total_fatalities': 0}
     
     def analyze_sentiment_and_death_words(self, text):
@@ -143,7 +150,7 @@ class EnhancedMIEClassifier:
     
     def create_rag_embeddings(self, articles_df):
         """Create RAG embeddings for similarity search"""
-        print("Creating RAG embeddings...")
+        self._log("Creating RAG embeddings...")
         
         # Combine text features
         articles_df['combined_text'] = (
@@ -162,7 +169,7 @@ class EnhancedMIEClassifier:
             'texts': texts
         }
         
-        print(f"Created embeddings for {len(texts)} articles")
+        self._log(f"Created embeddings for {len(texts)} articles")
     
     def retrieve_similar_articles(self, query_text, top_k=3):
         """Retrieve similar articles using RAG"""
@@ -239,29 +246,38 @@ Action Type: [type of military action if MIE]
 Countries: [list of countries]
 Fatalities: [number if mentioned]
 """
+        
+        # Instruct model to return STRICT JSON only as defined by the system message
+        prompt += """
+
+Return STRICT JSON only, with exactly these top-level keys and no extra text: 
+"classification", "reasoning", "codeable", "coding", "countries_involved", "missing_fields", "notes", "confrontation_key".
+Do not include any prose before or after the JSON.
+"""
         return prompt
     
     def load_and_prepare_data(self, filepath=None):
         """Load and prepare the dataset"""
-        print("Loading dataset...")
-        
-        # Use data manager if available
-        try:
-            from data_manager import DataManager
-            dm = DataManager()
-            self.df = dm.load_training_data()
-        except ImportError:
-            # Fallback to direct file loading
-            if filepath is None:
-                filepath = 'data/raw/final_data_true.csv'
+        self._log("Loading dataset...")
+        # Prefer direct file load if a filepath is provided
+        if filepath is not None:
             self.df = pd.read_csv(filepath)
+        else:
+            # Use data manager if available
+            try:
+                from data_manager import DataManager
+                dm = DataManager()
+                self.df = dm.load_training_data()
+            except ImportError:
+                filepath = 'data/raw/final_data_true.csv'
+                self.df = pd.read_csv(filepath)
         
         # Convert Probable MIE to binary labels
         self.df['label'] = (self.df['Probable MIE'] == 1).astype(int)
         
-        print(f"Dataset: {self.df.shape}")
-        print(f"MIE articles (1): {(self.df['label'] == 1).sum()}")
-        print(f"Non-MIE articles (0): {(self.df['label'] == 0).sum()}")
+        self._log(f"Dataset: {self.df.shape}")
+        self._log(f"MIE articles (1): {(self.df['label'] == 1).sum()}")
+        self._log(f"Non-MIE articles (0): {(self.df['label'] == 0).sum()}")
         
         # Create RAG embeddings
         self.create_rag_embeddings(self.df)
@@ -270,7 +286,7 @@ Fatalities: [number if mentioned]
     
     def train_enhanced_model(self, X, y):
         """Train enhanced ML model"""
-        print("Training enhanced ML model...")
+        self._log("Training enhanced ML model...")
         
         # TF-IDF vectorization
         self.vectorizer = TfidfVectorizer(
@@ -290,7 +306,7 @@ Fatalities: [number if mentioned]
         self.rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
         self.rf_model.fit(X_tfidf, y)
         
-        print("Enhanced models trained!")
+        self._log("Enhanced models trained!")
     
     def predict_enhanced_mie(self, title, subject, text):
         """Enhanced MIE prediction combining all approaches"""
@@ -337,11 +353,64 @@ Fatalities: [number if mentioned]
         }
     
     def parse_ollama_response(self, response):
-        """Parse structured response from Ollama"""
+        """Parse structured response from Ollama. Prefer strict JSON, fallback to legacy text parsing."""
         if not response:
             return {'classification': 'UNKNOWN', 'reasoning': 'No response'}
         
-        # Extract information from response
+        # Try JSON first
+        try:
+            obj = json.loads(response.strip())
+            coding = obj.get('coding', {}) or {}
+            action_val = coding.get('action') if isinstance(coding, dict) else None
+            # Compute a simple fatalities aggregate if available
+            try:
+                total_fatalities = 0
+                for k in ['fatalmax1', 'fatalmax2']:
+                    v = coding.get(k)
+                    if isinstance(v, (int, float)):
+                        total_fatalities += int(v)
+            except Exception:
+                total_fatalities = 0
+            return {
+                'classification': obj.get('classification', 'UNKNOWN'),
+                'reasoning': obj.get('reasoning', ''),
+                'action_type': action_val,
+                'countries': obj.get('countries_involved', []) or [],
+                'fatalities': total_fatalities,
+                'coding': coding,
+                'codeable': obj.get('codeable', True),
+                'missing_fields': obj.get('missing_fields', []),
+                'notes': obj.get('notes', ''),
+                'confrontation_key': obj.get('confrontation_key', '')
+            }
+        except Exception:
+            # Retry by asking for strict JSON only if the model responded non-JSON
+            try:
+                retry_payload = {
+                    "model": self.model_name,
+                    "prompt": "Return strict JSON only for the last request. No text.",
+                    "stream": False
+                }
+                r = requests.post(f"{self.ollama_url}/api/generate", json=retry_payload, timeout=20)
+                if r.status_code == 200:
+                    obj = json.loads(r.json().get('response','{}'))
+                    coding = obj.get('coding', {}) or {}
+                    return {
+                        'classification': obj.get('classification', 'UNKNOWN'),
+                        'reasoning': obj.get('reasoning', ''),
+                        'action_type': coding.get('action'),
+                        'countries': obj.get('countries_involved', []) or [],
+                        'fatalities': int(coding.get('fatalmax1',0)) + int(coding.get('fatalmax2',0)) if isinstance(coding, dict) else 0,
+                        'coding': coding,
+                        'codeable': obj.get('codeable', True),
+                        'missing_fields': obj.get('missing_fields', []),
+                        'notes': obj.get('notes', ''),
+                        'confrontation_key': obj.get('confrontation_key', '')
+                    }
+            except Exception:
+                pass
+        
+        # Legacy fallback: parse key-value lines
         classification = 'UNKNOWN'
         reasoning = ''
         action_type = ''
@@ -352,17 +421,17 @@ Fatalities: [number if mentioned]
         for line in lines:
             line = line.strip()
             if line.startswith('Classification:'):
-                classification = line.split(':')[1].strip()
+                classification = line.split(':', 1)[1].strip()
             elif line.startswith('Reasoning:'):
-                reasoning = line.split(':')[1].strip()
+                reasoning = line.split(':', 1)[1].strip()
             elif line.startswith('Action Type:'):
-                action_type = line.split(':')[1].strip()
+                action_type = line.split(':', 1)[1].strip()
             elif line.startswith('Countries:'):
-                countries_str = line.split(':')[1].strip()
+                countries_str = line.split(':', 1)[1].strip()
                 countries = [c.strip() for c in countries_str.split(',') if c.strip()]
             elif line.startswith('Fatalities:'):
                 try:
-                    fatalities = int(line.split(':')[1].strip())
+                    fatalities = int(line.split(':', 1)[1].strip())
                 except:
                     fatalities = 0
         
@@ -372,6 +441,63 @@ Fatalities: [number if mentioned]
             'action_type': action_type,
             'countries': countries,
             'fatalities': fatalities
+        }
+
+    def build_coding_json_fallback(self, title, subject, text, entities, sentiment, ml_decision):
+        """Build strict JSON schema when Ollama is offline to keep outputs consistent."""
+        # Heuristic action detection
+        t = f"{title} {subject} {text}".lower()
+        action = -9
+        if any(k in t for k in ['attack','airstrike','strike','clash','skirmish']):
+            action = 16 if 'attack' in t or 'strike' in t else 17
+        elif 'border' in t and ('violation' in t or 'cross' in t):
+            action = 12
+        elif 'show of force' in t:
+            action = 7
+        elif 'threat' in t:
+            action = 1
+        # ForceType heuristic
+        forcetype = -9
+        if any(k in t for k in ['army','troops','tanks','artillery','ground']):
+            forcetype = 1
+        elif any(k in t for k in ['navy','warship','frigate','submarine']):
+            forcetype = 2
+        elif any(k in t for k in ['air force','airstrike','jet','bomber','drone','helicopter']):
+            forcetype = 3
+        coding = {
+            "micnum": -9,
+            "eventnum": -9,
+            "ccode1": -9,
+            "ccode2": -9,
+            "stmon": -9,
+            "stday": -9,
+            "styear": -9,
+            "endmon": -9,
+            "endday": -9,
+            "endyear": -9,
+            "sidea": -9,
+            "action": action,
+            "fatalmin1": 0,
+            "fatalmax1": 0,
+            "fatalmin2": 0,
+            "fatalmax2": 0,
+            "Location": "",
+            "MeasuringPoint": "",
+            "Purpose": 0,
+            "ForceType": forcetype,
+            "MinForce": -9,
+            "MaxForce": -9
+        }
+        missing = [k for k,v in coding.items() if (isinstance(v,int) and v == -9) or (isinstance(v,str) and not v)]
+        return {
+            "classification": "MIE" if ml_decision == 1 else "NOT_MIE",
+            "reasoning": "Fallback JSON without LLM (offline).",
+            "codeable": True,
+            "coding": coding,
+            "countries_involved": entities.get('countries', []),
+            "missing_fields": missing,
+            "notes": "Built by ML+heuristics",
+            "confrontation_key": ""
         }
     
     def combine_predictions(self, ml_decision, ollama_analysis, sentiment_analysis, entities):

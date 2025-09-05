@@ -40,29 +40,39 @@ Is this an MIE? If yes, what type of action and what variables should be coded? 
 
     def parse_mie_response(self, response: str) -> Dict:
         """Parse the MIE Expert response to extract classification and details"""
+        # Prefer strict JSON
+        try:
+            obj = json.loads(response.strip())
+            coding = obj.get('coding', {}) or {}
+            return {
+                "classification": obj.get("classification", "UNKNOWN"),
+                "action_type": coding.get("action"),
+                "reasoning": obj.get("reasoning", ""),
+                "coding_variables": coding,
+                "codeable": obj.get("codeable", True),
+                "missing_fields": obj.get("missing_fields", []),
+                "notes": obj.get("notes", "")
+            }
+        except Exception:
+            pass
+        
+        # Legacy fallback
         result = {
             "classification": "UNKNOWN",
             "action_type": None,
             "reasoning": "",
             "coding_variables": {}
         }
-        
-        # Extract classification
         if "MIE (YES)" in response or "Classification: MIE (YES)" in response:
             result["classification"] = "MIE"
         elif "NOT_MIE" in response or "MIE (NO)" in response or "Classification: MIE (NO)" in response:
             result["classification"] = "NOT_MIE"
-        
-        # Extract action type
         action_match = re.search(r'Action Type:?\s*(\d+)', response, re.IGNORECASE)
         if action_match:
             result["action_type"] = int(action_match.group(1))
-        
-        # Extract reasoning
         reasoning_match = re.search(r'Reasoning:?\s*(.*?)(?=Action Type:|CODING|$)', response, re.DOTALL | re.IGNORECASE)
         if reasoning_match:
             result["reasoning"] = reasoning_match.group(1).strip()
-        
         return result
 
     def test_sample_articles(self, df: pd.DataFrame, sample_size: int = 10) -> List[Dict]:

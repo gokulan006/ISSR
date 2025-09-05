@@ -14,6 +14,7 @@ This system uses the Enhanced MIE Classifier that combines:
 import sys
 import os
 from pathlib import Path
+import argparse
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -24,26 +25,22 @@ from ml.models.enhanced_mie_classifier import EnhancedMIEClassifier
 
 def main():
     """Main entry point for the MIE classification system"""
-    
-    print("🚀 ENHANCED MIE CLASSIFICATION SYSTEM")
-    print("Combines: ML + RAG + Ollama + MIC Heuristics")
-    print("=" * 50)
-    
-    # Initialize enhanced classifier with correct model name
-    classifier = EnhancedMIEClassifier(model_name="mie-expert")
-    
-    # Check Ollama connection
-    if classifier.check_ollama():
-        print("✅ Ollama connected! Using full system (ML + RAG + LLM)")
-    else:
-        print("❌ Ollama not available. Using ML + RAG only.")
-        print("   To enable LLM: run 'ollama serve' and './setup_ollama.sh'")
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--quiet', action='store_true', help='Minimal console output')
+    parser.add_argument('--json', action='store_true', help='Also print strict JSON coding block')
+    parser.add_argument('--model', default='mie-expert', help='Ollama model name')
+    parser.add_argument('--data', default='data/raw/final_data_true.csv', help='Training CSV path')
+    args = parser.parse_args()
+
+    if not args.quiet:
+        print("Loading…")
+
+    # Initialize enhanced classifier
+    classifier = EnhancedMIEClassifier(model_name=args.model, verbose=not args.quiet)
+
     # Load and prepare data
-    print("\n📊 Loading training data...")
     try:
-        df = classifier.load_and_prepare_data('data/raw/final_data_true.csv')
-        print(f"✅ Loaded {len(df)} articles for training")
+        df = classifier.load_and_prepare_data(args.data)
         
         # Prepare features
         df['combined_text'] = df['Title'].fillna('') + ' ' + df['Subject '].fillna('') + ' ' + df['Text'].fillna('')
@@ -51,37 +48,54 @@ def main():
         y = df['label']
         
         # Train enhanced model
-        print("🤖 Training enhanced model...")
         classifier.train_enhanced_model(X, y)
-        print("✅ Model trained successfully!")
         
         # Create RAG embeddings for similar article retrieval
-        print("🔍 Creating RAG embeddings...")
         classifier.create_rag_embeddings(df)
-        print("✅ RAG system ready!")
         
     except FileNotFoundError:
-        print("⚠️  Training data not found at 'data/raw/final_data_true.csv'")
+        print("Training data not found.")
         print("   Please ensure the file exists and try again.")
         return
     except Exception as e:
-        print(f"⚠️  Error loading data: {e}")
-        print("   Please check your data files and try again.")
+        print(f"Error loading data: {e}")
         return
     
-    # Start interactive mode
-    print("\n🎯 Starting Interactive Classification Mode")
-    print("Enter article details to classify as MIE or NOT_MIE")
-    print("Type 'quit' for title to exit")
-    print("-" * 50)
+    if not args.quiet:
+        print("Ready. Enter article details (type 'quit' for title to exit).")
     
     try:
-        classifier.interactive_mode()
+        # Lightweight interactive loop using existing method
+        # If args.json set, show parsed JSON after verdict
+        while True:
+            title = input("Article Title (or 'quit'): ").strip()
+            if title.lower() == 'quit':
+                break
+            subject = input("Subject: ").strip()
+            text = input("Text: ").strip()
+            if not any([title, subject, text]):
+                continue
+            result = classifier.predict_enhanced_mie(title, subject, text)
+            print(f"Prediction: {'MIE' if result['final_prediction'] == 1 else 'NOT_MIE'}  (conf={result['confidence']:.2f})")
+            if args.json:
+                # When Ollama is available, classifier returns parsed Ollama JSON in result['ollama_analysis']? For strict JSON, print coding if present
+                coding = result.get('ollama_analysis', {}).get('coding') if isinstance(result.get('ollama_analysis'), dict) else None
+                if coding:
+                    import json as _json
+                    obj = {"classification": result['ollama_analysis'].get('classification','UNKNOWN'),
+                           "reasoning": result['ollama_analysis'].get('reasoning',''),
+                           "codeable": result.get('ollama_analysis',{}).get('codeable', True),
+                           "coding": coding,
+                           "countries_involved": result['ollama_analysis'].get('countries', []),
+                           "missing_fields": result['ollama_analysis'].get('missing_fields', []),
+                           "notes": result['ollama_analysis'].get('notes',''),
+                           "confrontation_key": result['ollama_analysis'].get('confrontation_key','')}
+                    print(_json.dumps(obj, ensure_ascii=False))
     except KeyboardInterrupt:
-        print("\n\n👋 Thanks for using the Enhanced MIE Classifier!")
+        if not args.quiet:
+            print("\nGoodbye.")
     except Exception as e:
-        print(f"\n❌ Error in interactive mode: {e}")
-        print("Please restart the program.")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main() 

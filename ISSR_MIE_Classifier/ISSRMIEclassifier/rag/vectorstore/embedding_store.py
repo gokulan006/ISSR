@@ -39,14 +39,42 @@ class MIEVectorStore:
         
         # Load dataset
         df = pd.read_csv(data_path)
-        df['label'] = (df['Probable MIE'] == 1).astype(int)
+
+        # Flexible column detection to support both master and mie_only CSVs
+        def _pick(colnames):
+            for name in colnames:
+                if name in df.columns:
+                    return name
+            return None
+
+        title_col = _pick(["Title", "title"])
+        subject_col = _pick(["Subject ", "Subject", "subject"])
+        text_col = _pick(["Text", "text", "content", "body"])  # fallbacks
+        label_col = _pick(["Probable MIE", "probable", "label", "is_mie"])  # fallbacks
+
+        # Build label column robustly
+        if label_col is not None:
+            vals = df[label_col]
+            if vals.dtype.kind in {"i", "u", "f"}:
+                df['label'] = (vals.astype(float) >= 1.0).astype(int)
+            else:
+                df['label'] = vals.astype(str).str.lower().isin(["1", "true", "yes", "mie"]).astype(int)
+        else:
+            df['label'] = 0
         
         # Create combined text
-        df['combined_text'] = (
-            df['Title'].fillna('') + ' ' + 
-            df['Subject '].fillna('') + ' ' + 
-            df['Text'].fillna('')
-        )
+        parts = []
+        if title_col is not None:
+            parts.append(df[title_col].fillna(''))
+        if subject_col is not None:
+            parts.append(df[subject_col].fillna(''))
+        if text_col is not None:
+            parts.append(df[text_col].fillna(''))
+        if not parts:
+            raise ValueError("No suitable text columns found. Expected one of Title/title and Text/text.")
+        df['combined_text'] = (parts[0] if len(parts) == 1 else parts[0].astype(str))
+        for p in parts[1:]:
+            df['combined_text'] = df['combined_text'].astype(str) + ' ' + p.astype(str)
         
         # Add articles to vector store
         documents = df['combined_text'].tolist()
@@ -57,9 +85,9 @@ class MIEVectorStore:
                 "source": "mie_dataset",
                 "type": "article",
                 "article_id": idx,
-                "title": row['Title'],
-                "label": row['label'],
-                "mie_probable": row['Probable MIE']
+                "title": row[title_col] if title_col is not None else "",
+                "label": int(row['label']),
+                "mie_probable": (row[label_col] if label_col is not None else 0)
             })
         
         self.add_documents(documents, metadata)

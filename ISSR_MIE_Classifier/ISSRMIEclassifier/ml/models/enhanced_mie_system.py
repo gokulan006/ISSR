@@ -7,6 +7,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sentence_transformers import SentenceTransformer
 import re
 import logging
+import json
 
 class EnhancedMIESystem:
     def __init__(self, ollama_url="http://localhost:11434"):
@@ -148,19 +149,13 @@ class EnhancedMIESystem:
     def create_enhanced_prompt(self, title, subject, text, similar_articles):
         """Create enhanced prompt with RAG examples and enforce MICclass format"""
         
-        # XML format with keywords for better performance
+        # Prompt directing STRICT JSON output as defined in the system message
         prompt = f"""
-<article>
-{text[:400]}...
-</article>
+Analyze the following article and return STRICT JSON only, per the system schema.
 
-<classification>
-1. Classification: <MIE/NOT_MIE>
-2. Reasoning: <explanation>
-3. Action type: <action type or N/A>
-4. Countries involved: <countries>
-5. Fatalities: <fatalities or N/A>
-</classification>
+TITLE: {title}
+SUBJECT: {subject}
+TEXT: {text[:800]}...
 """
         return prompt
     
@@ -199,21 +194,36 @@ class EnhancedMIESystem:
         if not response:
             return {'classification': 'UNKNOWN'}
         
+        # Prefer JSON
+        try:
+            obj = json.loads(response.strip())
+            coding = obj.get('coding', {}) or {}
+            return {
+                'classification': obj.get('classification', 'UNKNOWN'),
+                'reasoning': obj.get('reasoning', ''),
+                'action_type': coding.get('action', -9),
+                'coding': coding,
+                'codeable': obj.get('codeable', True),
+                'missing_fields': obj.get('missing_fields', []),
+                'notes': obj.get('notes', '')
+            }
+        except Exception:
+            pass
+        
+        # Fallback legacy parsing
         classification = 'UNKNOWN'
         reasoning = ''
         action_type = ''
-        countries = []
-        fatalities = 0
         
         lines = response.split('\n')
         for line in lines:
             line = line.strip()
-            if 'classification' in line.lower() and 'mie' in line.lower():
-                classification = 'MIE' if 'mie' in line.lower() else 'NOT_MIE'
-            elif 'reasoning' in line.lower():
-                reasoning = line.split(':')[-1].strip()
+            if line.lower().startswith('classification'):
+                classification = 'MIE' if 'mie' in line.lower() and 'not' not in line.lower() else 'NOT_MIE'
+            elif line.lower().startswith('reasoning'):
+                reasoning = line.split(':', 1)[-1].strip()
             elif 'action' in line.lower():
-                action_type = line.split(':')[-1].strip()
+                action_type = line.split(':', 1)[-1].strip()
         
         return {
             'classification': classification,
