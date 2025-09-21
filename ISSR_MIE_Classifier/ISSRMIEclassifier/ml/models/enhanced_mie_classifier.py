@@ -4,6 +4,8 @@ import requests
 import json
 import re
 import os
+import sys
+from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier
@@ -17,6 +19,11 @@ from sentence_transformers import SentenceTransformer
 import pickle
 import warnings
 warnings.filterwarnings('ignore')
+
+# Add utils to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
+from utils.timeout_handler import safe_request_with_timeout, progress_indicator
 
 class EnhancedMIEClassifier:
     def __init__(self, ollama_url="http://localhost:11434", model_name="MICclass", verbose: bool = False):
@@ -57,8 +64,8 @@ class EnhancedMIEClassifier:
             return False
     
     def query_ollama(self, prompt):
-        """Query Ollama with a prompt"""
-        try:
+        """Query Ollama with a prompt and timeout handling"""
+        def _make_request():
             payload = {
                 "model": self.model_name,
                 "prompt": prompt,
@@ -76,11 +83,14 @@ class EnhancedMIEClassifier:
                 return result.get('response', '').strip()
             else:
                 return None
-                
-        except Exception as e:
-            if self.verbose:
-                print(f"Error: {e}")
-            return None
+        
+        # Use safe request with timeout
+        result = safe_request_with_timeout(_make_request, timeout=30)
+        
+        if result is None and self.verbose:
+            print("⚠️  Ollama request failed or timed out")
+        
+        return result
     
     def extract_entities(self, text):
         """Enhanced entity extraction based on your existing work"""
@@ -547,54 +557,94 @@ Do not include any prose before or after the JSON.
         return min(confidence, 1.0)
     
     def interactive_mode(self):
-        """Interactive classification mode"""
+        """Interactive classification mode with improved UX"""
         print("\n=== ENHANCED MIE CLASSIFICATION SYSTEM ===")
         print("Combines: ML + RAG + Ollama + Your MIC Heuristics")
+        print("💡 Tip: Type 'quit' for title to exit, 'help' for commands")
         
         while True:
             print("\n" + "-"*50)
-            title = input("Article Title (or 'quit'): ").strip()
-            if title.lower() == 'quit':
+            
+            try:
+                title = input("Article Title (or 'quit'): ").strip()
+                if title.lower() == 'quit':
+                    break
+                if title.lower() == 'help':
+                    self._show_help()
+                    continue
+                
+                if not title:
+                    print("⚠️  Please enter a title!")
+                    continue
+                
+                subject = input("Subject: ").strip()
+                text = input("Text: ").strip()
+                
+                if not any([title, subject, text]):
+                    print("⚠️  Please provide some content!")
+                    continue
+                
+                print("\n🔍 Analyzing with Enhanced System...")
+                progress_indicator("Processing article", 2)
+                
+                result = self.predict_enhanced_mie(title, subject, text)
+                
+                # Display results
+                self._display_results(result)
+                
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!")
                 break
-            
-            subject = input("Subject: ").strip()
-            text = input("Text: ").strip()
-            
-            if not any([title, subject, text]):
-                print("Please provide some content!")
+            except Exception as e:
+                print(f"\n❌ Error: {e}")
+                print("Please try again or type 'quit' to exit")
                 continue
-            
-            print("\n🔍 Analyzing with Enhanced System...")
-            result = self.predict_enhanced_mie(title, subject, text)
-            
-            # Display results
-            print(f"\n📊 ENHANCED ANALYSIS RESULTS:")
-            print(f"Final Prediction: {'MIE' if result['final_prediction'] == 1 else 'NOT_MIE'}")
-            print(f"Confidence: {result['confidence']:.2f}")
-            
-            print(f"\n🤖 ML Prediction: {'MIE' if result['ml_prediction'] == 1 else 'NOT_MIE'}")
-            
-            if result['ollama_analysis']['classification'] != 'UNKNOWN':
-                print(f"🧠 Ollama Analysis:")
-                print(f"  Classification: {result['ollama_analysis']['classification']}")
-                print(f"  Reasoning: {result['ollama_analysis']['reasoning']}")
-                print(f"  Action Type: {result['ollama_analysis']['action_type']}")
-                print(f"  Countries: {result['ollama_analysis']['countries']}")
-                print(f"  Fatalities: {result['ollama_analysis']['fatalities']}")
-            
-            print(f"\n🔍 Entity Extraction:")
-            print(f"  Countries: {result['entities']['countries']}")
-            print(f"  Total Fatalities: {result['entities']['total_fatalities']}")
-            
-            print(f"\n📈 Sentiment Analysis:")
-            print(f"  Sentiment: {result['sentiment_analysis']['sentiment_compound']:.3f}")
-            print(f"  MIE Words: {result['sentiment_analysis']['mie_word_count']}")
-            print(f"  Death Words: {result['sentiment_analysis']['death_word_count']}")
-            
-            if result['similar_articles']:
-                print(f"\n📚 Similar Articles (RAG):")
-                for i, article in enumerate(result['similar_articles'][:2], 1):
-                    print(f"  {i}. {article['title'][:50]}... (Similarity: {article['similarity']:.3f})")
+    
+    def _show_help(self):
+        """Show help information"""
+        print("\n📖 HELP - Available Commands:")
+        print("  'quit' - Exit the program")
+        print("  'help' - Show this help")
+        print("\n📝 Input Tips:")
+        print("  - Provide meaningful titles for better analysis")
+        print("  - Include full article text when possible")
+        print("  - The system will timeout after 30 seconds if Ollama is slow")
+        print("\n🔍 Analysis Features:")
+        print("  - ML Classification (TF-IDF + Random Forest)")
+        print("  - RAG Context (similar articles)")
+        print("  - Ollama LLM Analysis (if available)")
+        print("  - Entity Extraction (countries, fatalities)")
+        print("  - Sentiment Analysis")
+    
+    def _display_results(self, result):
+        """Display analysis results in a formatted way"""
+        print(f"\n📊 ENHANCED ANALYSIS RESULTS:")
+        print(f"Final Prediction: {'MIE' if result['final_prediction'] == 1 else 'NOT_MIE'}")
+        print(f"Confidence: {result['confidence']:.2f}")
+        
+        print(f"\n🤖 ML Prediction: {'MIE' if result['ml_prediction'] == 1 else 'NOT_MIE'}")
+        
+        if result.get('ollama_analysis', {}).get('classification') != 'UNKNOWN':
+            print(f"🧠 Ollama Analysis:")
+            print(f"  Classification: {result['ollama_analysis']['classification']}")
+            print(f"  Reasoning: {result['ollama_analysis']['reasoning']}")
+            print(f"  Action Type: {result['ollama_analysis']['action_type']}")
+            print(f"  Countries: {result['ollama_analysis']['countries']}")
+            print(f"  Fatalities: {result['ollama_analysis']['fatalities']}")
+        
+        print(f"\n🔍 Entity Extraction:")
+        print(f"  Countries: {result['entities']['countries']}")
+        print(f"  Total Fatalities: {result['entities']['total_fatalities']}")
+        
+        print(f"\n📈 Sentiment Analysis:")
+        print(f"  Sentiment: {result['sentiment_analysis']['sentiment_compound']:.3f}")
+        print(f"  MIE Words: {result['sentiment_analysis']['mie_word_count']}")
+        print(f"  Death Words: {result['sentiment_analysis']['death_word_count']}")
+        
+        if result.get('similar_articles'):
+            print(f"\n📚 Similar Articles (RAG):")
+            for i, article in enumerate(result['similar_articles'][:2], 1):
+                print(f"  {i}. {article['title'][:50]}... (Similarity: {article['similarity']:.3f})")
 
 def main():
     print("🚀 ENHANCED MIE CLASSIFICATION SYSTEM")
